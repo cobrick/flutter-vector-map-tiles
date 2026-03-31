@@ -1,10 +1,7 @@
 import 'package:executor_lib/executor_lib.dart';
-import 'package:vector_tile_dem/vector_tile_dem.dart';
 import 'package:vector_tile_renderer/vector_tile_renderer.dart';
 
 import '../../vector_map_tiles.dart';
-import '../provider/caching_vector_tile_provider.dart';
-import '../provider/raster_dem_tile_provider.dart';
 import 'atlas_image_cache.dart';
 import 'byte_storage.dart';
 import 'image_loading_cache.dart';
@@ -92,27 +89,9 @@ class Caches {
       Iterable<MapEntry<String, VectorTileProvider>> vectorProviders) {
     final sources = theme.tileSources;
     return TileProviders(Map.fromEntries(vectorProviders
-        .where((e) => sources.contains(e.key))
-        .map((e) => MapEntry(e.key, _toVector(e.key, e.value)))));
+        .where((e) => sources.contains(e.key))));
   }
 
-  VectorTileProvider _toVector(String name, VectorTileProvider provider) {
-    if (provider.type == TileProviderType.raster_dem) {
-      return RasterDemVectorTileProvider(
-          executor: executor,
-          delegate: CachingVectorTileProvider(
-              cache: storageCache,
-              cacheKey: (tile) => '$name-dem-${tile.z}-${tile.x}-${tile.y}.png',
-              delegate: provider),
-          options: ({required int zoom}) {
-            if (zoom < 12) {
-              return ContourOptions();
-            }
-            return ContourOptions(minorLevel: 20, majorLevel: 100);
-          });
-    }
-    return provider;
-  }
 }
 
 extension _PctExtension on double {
