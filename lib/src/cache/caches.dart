@@ -88,10 +88,9 @@ class Caches {
   TileProviders _createTileProviders(Theme theme,
       Iterable<MapEntry<String, VectorTileProvider>> vectorProviders) {
     final sources = theme.tileSources;
-    return TileProviders(Map.fromEntries(vectorProviders
-        .where((e) => sources.contains(e.key))));
+    return TileProviders(
+        Map.fromEntries(vectorProviders.where((e) => sources.contains(e.key))));
   }
-
 }
 
 extension _PctExtension on double {
