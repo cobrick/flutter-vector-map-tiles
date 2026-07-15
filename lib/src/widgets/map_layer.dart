@@ -51,12 +51,18 @@ class MapLayerState extends AbstractMapLayerState<MapLayer> {
   @override
   Future<void> preRender(TileDataModel tile) {
     return super.preRender(tile).then((_) async {
+      // The tile can scroll out of view (and be disposed by MapTiles) while it
+      // was loading or is being prepared. Abort at each step so a fast
+      // multi-level zoom doesn't spend atlas/isolate/GPU work on tiles that are
+      // no longer visible.
+      if (tile.disposed) return;
       final tileset = tile.tileset ?? Tileset({});
       final tileID = tile.tile.key();
       final jobArguments =
           (widget.mapProperties.theme.id, zoom, tileset, tileID);
 
       await tilesRenderer.preRenderUi(zoom, tileset, tileID);
+      if (tile.disposed) return;
       await executor
           .submit(Job(
         "pre-render",
@@ -66,6 +72,7 @@ class MapLayerState extends AbstractMapLayerState<MapLayer> {
             "pre-render:${widget.mapProperties.theme.id}-${widget.mapProperties.theme.version}-$zoom-${tile.tile.key()}",
       ))
           .then((renderData) {
+        if (tile.disposed) return;
         try {
           tile.renderData ??= renderData.materialize().asUint8List();
         } catch (_) {}

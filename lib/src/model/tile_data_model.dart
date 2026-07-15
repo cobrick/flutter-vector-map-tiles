@@ -11,6 +11,11 @@ class TileDataModel {
   bool isLoaded = false;
   bool isDisplayReady = false;
   bool preRenderStarted = false;
+
+  /// Set once this tile has been disposed by [MapTiles] because it left the
+  /// viewport and is no longer needed. Long-running pre-render work checks this
+  /// so it can abort instead of preparing a tile that is no longer visible.
+  bool disposed = false;
   Tileset? tileset;
   RasterTileset? rasterTileset;
   Uint8List? renderData;
@@ -18,6 +23,7 @@ class TileDataModel {
   TileDataModel(this.tilePosition) : tile = tilePosition.tile;
 
   void dispose() {
+    disposed = true;
     isLoaded = false;
     isDisplayReady = false;
     preRenderStarted = false;
