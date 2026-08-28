@@ -21,7 +21,9 @@ class MapLayer extends AbstractMapLayer {
 }
 
 class MapLayerState extends AbstractMapLayerState<MapLayer> {
-  late final TilesRenderer tilesRenderer;
+  // Not `final`: didUpdateWidget replaces it when the theme changes, and a
+  // second assignment to a `late final` throws LateInitializationError.
+  late TilesRenderer tilesRenderer;
   var _ready = false;
   List<String> _previousTileKeys = [];
 
@@ -34,8 +36,9 @@ class MapLayerState extends AbstractMapLayerState<MapLayer> {
 
   @override
   void dispose() {
-    super.dispose();
+    // Own resources first, framework last.
     tilesRenderer.dispose();
+    super.dispose();
   }
 
   @override
@@ -128,11 +131,23 @@ class MapLayerState extends AbstractMapLayerState<MapLayer> {
   }
 
   FutureOr _initialized(void value) {
-    if (mounted) {
+    if (!mounted) return null;
+
+    // `TilesRenderer.initialize` is static and completes once per process, so
+    // every layer mounted after the first resolves this future immediately —
+    // in the same microtask drain as its own initState. Calling setState
+    // there marks the element dirty while an ancestor (FlutterMap's
+    // LayoutBuilder) is still building, which trips
+    // "Tried to build dirty widget in the wrong build scope". Waiting for the
+    // frame to end makes the first mount and every later one behave alike.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
       setState(() {
         _ready = true;
       });
-    }
+    });
+
+    return null;
   }
 }
 
