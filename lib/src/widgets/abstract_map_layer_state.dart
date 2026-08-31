@@ -28,7 +28,7 @@ abstract class AbstractMapLayerState<T extends AbstractMapLayer>
     extends State<T>
     with SingleTickerProviderStateMixin {
   late final Executor executor;
-  late final TileLoader tileLoader;
+  late TileLoader tileLoader;
   late MapTiles mapTiles;
   FlutterMapAdapter? _mapAdapter;
   Ticker? _animationTicker;
@@ -103,8 +103,11 @@ abstract class AbstractMapLayerState<T extends AbstractMapLayer>
   });
 
   void resetState() {
+    _mapAdapter?.dispose();
     mapTiles.dispose();
+    tileLoader = _createTileLoader();
     mapTiles = MapTiles(tileLoader: tileLoader);
+    _mapAdapter = _createMapAdapter(mapTiles);
     mapTiles.addListener(_updateTiles);
     setState(() {});
   }
@@ -115,18 +118,24 @@ abstract class AbstractMapLayerState<T extends AbstractMapLayer>
     executor = newConcurrentExecutor(
       concurrency: widget.mapProperties.concurrency,
     );
-    tileLoader = widget.tileLoaderFactory(
-      widget.mapProperties,
-      executor,
-      ThemeRepo(),
-    );
+    tileLoader = _createTileLoader();
     mapTiles = MapTiles(tileLoader: tileLoader);
-    _mapAdapter ??= FlutterMapAdapter(
-      mapTiles: mapTiles,
+    _mapAdapter ??= _createMapAdapter(mapTiles);
+    mapTiles.addListener(_updateTiles);
+  }
+
+  TileLoader _createTileLoader() => widget.tileLoaderFactory(
+    widget.mapProperties,
+    executor,
+    ThemeRepo(),
+  );
+
+  FlutterMapAdapter _createMapAdapter(MapTiles targetMapTiles) {
+    return FlutterMapAdapter(
+      mapTiles: targetMapTiles,
       mapUpdated: _mapUpdated,
       tileOffset: widget.mapProperties.tileOffset,
     );
-    mapTiles.addListener(_updateTiles);
   }
 
   void _mapUpdated() {
