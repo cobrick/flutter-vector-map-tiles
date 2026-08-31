@@ -15,7 +15,7 @@ import 'flutter_map_adapter.dart';
 abstract class AbstractMapLayer extends StatefulWidget {
   final MapProperties mapProperties;
   final TileLoader Function(MapProperties, Executor, ThemeRepo)
-      tileLoaderFactory;
+  tileLoaderFactory;
 
   const AbstractMapLayer({
     super.key,
@@ -25,10 +25,11 @@ abstract class AbstractMapLayer extends StatefulWidget {
 }
 
 abstract class AbstractMapLayerState<T extends AbstractMapLayer>
-    extends State<T> with SingleTickerProviderStateMixin {
+    extends State<T>
+    with SingleTickerProviderStateMixin {
   late final Executor executor;
-  late final TileLoader tileLoader;
-  late final MapTiles mapTiles;
+  late TileLoader tileLoader;
+  late MapTiles mapTiles;
   FlutterMapAdapter? _mapAdapter;
   Ticker? _animationTicker;
   DateTime? _animationEndTime;
@@ -50,8 +51,10 @@ abstract class AbstractMapLayerState<T extends AbstractMapLayer>
   }
 
   void _updateTiles() {
-    for (final tile in mapTiles.tileModels.where((model) =>
-        model.isLoaded && !model.isDisplayReady && !model.preRenderStarted)) {
+    for (final tile in mapTiles.tileModels.where(
+      (model) =>
+          model.isLoaded && !model.isDisplayReady && !model.preRenderStarted,
+    )) {
       preRender(tile).then((_) {
         if (mounted) {
           setState(() {
@@ -96,12 +99,15 @@ abstract class AbstractMapLayerState<T extends AbstractMapLayer>
   }
 
   Future<void> preRender(TileDataModel tile) => Future.sync(() {
-        tile.preRenderStarted = true;
-      });
+    tile.preRenderStarted = true;
+  });
 
   void resetState() {
+    _mapAdapter?.dispose();
     mapTiles.dispose();
+    tileLoader = _createTileLoader();
     mapTiles = MapTiles(tileLoader: tileLoader);
+    _mapAdapter = _createMapAdapter(mapTiles);
     mapTiles.addListener(_updateTiles);
     setState(() {});
   }
@@ -112,15 +118,24 @@ abstract class AbstractMapLayerState<T extends AbstractMapLayer>
     executor = newConcurrentExecutor(
       concurrency: widget.mapProperties.concurrency,
     );
-    tileLoader =
-        widget.tileLoaderFactory(widget.mapProperties, executor, ThemeRepo());
+    tileLoader = _createTileLoader();
     mapTiles = MapTiles(tileLoader: tileLoader);
-    _mapAdapter ??= FlutterMapAdapter(
-      mapTiles: mapTiles,
+    _mapAdapter ??= _createMapAdapter(mapTiles);
+    mapTiles.addListener(_updateTiles);
+  }
+
+  TileLoader _createTileLoader() => widget.tileLoaderFactory(
+    widget.mapProperties,
+    executor,
+    ThemeRepo(),
+  );
+
+  FlutterMapAdapter _createMapAdapter(MapTiles targetMapTiles) {
+    return FlutterMapAdapter(
+      mapTiles: targetMapTiles,
       mapUpdated: _mapUpdated,
       tileOffset: widget.mapProperties.tileOffset,
     );
-    mapTiles.addListener(_updateTiles);
   }
 
   void _mapUpdated() {

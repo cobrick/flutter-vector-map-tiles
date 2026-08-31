@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:isolate';
 
 import 'package:executor_lib/executor_lib.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/widgets.dart';
 import 'package:vector_tile_renderer/vector_tile_renderer.dart';
 
@@ -21,7 +22,9 @@ class MapLayer extends AbstractMapLayer {
 }
 
 class MapLayerState extends AbstractMapLayerState<MapLayer> {
-  late final TilesRenderer tilesRenderer;
+  // Not `final`: didUpdateWidget replaces it when the theme changes, and a
+  // second assignment to a `late final` throws LateInitializationError.
+  late TilesRenderer tilesRenderer;
   var _ready = false;
   List<String> _previousTileKeys = [];
 
@@ -34,8 +37,9 @@ class MapLayerState extends AbstractMapLayerState<MapLayer> {
 
   @override
   void dispose() {
-    super.dispose();
+    // Own resources first, framework last.
     tilesRenderer.dispose();
+    super.dispose();
   }
 
   @override
@@ -51,12 +55,18 @@ class MapLayerState extends AbstractMapLayerState<MapLayer> {
   @override
   Future<void> preRender(TileDataModel tile) {
     return super.preRender(tile).then((_) async {
+      // The tile can scroll out of view (and be disposed by MapTiles) while it
+      // was loading or is being prepared. Abort at each step so a fast
+      // multi-level zoom doesn't spend atlas/isolate/GPU work on tiles that are
+      // no longer visible.
+      if (tile.disposed) return;
       final tileset = tile.tileset ?? Tileset({});
       final tileID = tile.tile.key();
       final jobArguments =
           (widget.mapProperties.theme.id, zoom, tileset, tileID);
 
       await tilesRenderer.preRenderUi(zoom, tileset, tileID);
+      if (tile.disposed) return;
       await executor
           .submit(Job(
         "pre-render",
@@ -66,6 +76,7 @@ class MapLayerState extends AbstractMapLayerState<MapLayer> {
             "pre-render:${widget.mapProperties.theme.id}-${widget.mapProperties.theme.version}-$zoom-${tile.tile.key()}",
       ))
           .then((renderData) {
+        if (tile.disposed) return;
         try {
           tile.renderData ??= renderData.materialize().asUint8List();
         } catch (_) {}
@@ -121,11 +132,39 @@ class MapLayerState extends AbstractMapLayerState<MapLayer> {
   }
 
   FutureOr _initialized(void value) {
-    if (mounted) {
+    if (!mounted) return null;
+
+    // `TilesRenderer.initialize` is static and completes once per process, so
+    // every layer mounted after the first resolves this future immediately —
+    // in the same microtask drain as its own initState. Calling setState
+    // there marks the element dirty while an ancestor (FlutterMap's
+    // LayoutBuilder) is still building, which trips "Tried to build dirty
+    // widget in the wrong build scope". Only that case needs deferring; the
+    // common one can flip synchronously.
+    //
+    // `build` renders nothing until `_ready`, so a deferral that never runs
+    // leaves a blank layer. addPostFrameCallback does not itself request a
+    // frame, hence the explicit scheduleFrame.
+    final phase = SchedulerBinding.instance.schedulerPhase;
+    final isBuilding = phase == SchedulerPhase.persistentCallbacks ||
+        phase == SchedulerPhase.midFrameMicrotasks;
+
+    if (!isBuilding) {
       setState(() {
         _ready = true;
       });
+      return null;
     }
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      setState(() {
+        _ready = true;
+      });
+    });
+    WidgetsBinding.instance.scheduleFrame();
+
+    return null;
   }
 }
 
