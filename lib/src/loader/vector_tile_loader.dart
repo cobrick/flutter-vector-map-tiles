@@ -7,6 +7,7 @@ import '../../vector_map_tiles.dart';
 import '../cache/cache.dart';
 import '../model/map_properties.dart';
 import '../tile_translation.dart';
+import 'encoded_tileset.dart';
 import 'theme_repo.dart';
 import 'vector_tile_transform.dart';
 
@@ -33,38 +34,62 @@ class VectorTileLoader {
   }
 
   Future<Tileset> load(TileIdentity tile, bool Function() cancelled) async {
-    final sourceTiles = mapProperties.theme.tileSources
-        .map(
-          (source) => MapEntry(source, mapProperties.tileProviders.get(source)),
-        )
-        .where((e) => e.value.type == TileProviderType.vector)
-        .map((e) => _load(e.key, e.value, tile, cancelled));
     final tilesBySource = <String, Tile>{};
-    for (final sourceTileFuture in sourceTiles) {
-      final sourceTile = await sourceTileFuture;
-      final tile = sourceTile.tile;
-      if (tile != null) {
-        tilesBySource[sourceTile.source] = tile;
-      }
+    for (final MapEntry(key: source, value: provider) in _vectorProviders) {
+      final (bytes, translation) =
+          await _fetch(source, provider, tile, cancelled);
+      tilesBySource[source] = bytes == null
+          ? emptyTileData(mapProperties.theme).toTile()
+          : await transform.apply(bytes, translation, cancelled);
     }
     return Tileset(tilesBySource);
   }
 
-  TileData _emptyTile() => TileFactory(
-        mapProperties.theme,
-        const Logger.noop(),
-      ).createTileData(VectorTile(layers: []));
+  /// Fetches the tile's vector source tiles without decoding them, for a
+  /// layer that decodes them on a worker isolate. Completes once the theme
+  /// is set up on the executor's isolates, ready for that.
+  Future<EncodedTileset> loadEncoded(
+    TileIdentity tile,
+    bool Function() cancelled,
+  ) async {
+    final tiles = <EncodedTile>[];
+    for (final MapEntry(key: source, value: provider) in _vectorProviders) {
+      final (bytes, translation) =
+          await _fetch(source, provider, tile, cancelled);
+      tiles.add(EncodedTile(
+        source: source,
+        bytes: bytes == null ? null : _compact(bytes),
+        translation: translation,
+      ));
+    }
+    final themeId = mapProperties.theme.id;
+    if (!themeRepo.isThemeReady(themeId)) {
+      await themeRepo.waitForTheme(themeId);
+    }
+    return EncodedTileset(tiles, tileSize: tileSize);
+  }
 
-  Future<_SourceTile> _load(
+  Iterable<MapEntry<String, VectorTileProvider>> get _vectorProviders =>
+      mapProperties.theme.tileSources
+          .map(
+            (source) =>
+                MapEntry(source, mapProperties.tileProviders.get(source)),
+          )
+          .where((e) => e.value.type == TileProviderType.vector);
+
+  /// The bytes of [source]'s tile that holds [tile], or null when the source
+  /// has none, and where [tile] lies in it.
+  Future<(Uint8List?, TileTranslation)> _fetch(
     String source,
     VectorTileProvider provider,
     TileIdentity tile,
     bool Function() cancelled,
   ) async {
     if (tile.z < provider.minimumZoom) {
-      return _SourceTile(source: source, tile: _emptyTile().toTile());
+      return (null, TileTranslation.identity(tile));
     }
-    var translation = SlippyMapTranslator(provider.maximumZoom).translate(tile);
+    final translation =
+        SlippyMapTranslator(provider.maximumZoom).translate(tile);
     final tileToLoad = translation.translated;
     final themeKey = mapProperties.theme.id;
     final cacheKey =
@@ -77,21 +102,20 @@ class VectorTileLoader {
       );
     } on ProviderException catch (error) {
       if (error.statusCode == 404 || error.statusCode == 204) {
-        return _SourceTile(source: source, tile: _emptyTile().toTile());
+        return (null, translation);
       }
       rethrow;
     }
     if (cancelled()) {
       throw CancellationException();
     }
-    final transformed = await transform.apply(bytes, translation, cancelled);
-    return _SourceTile(source: source, tile: transformed);
+    return (bytes, translation);
   }
-}
 
-class _SourceTile {
-  final String source;
-  final Tile? tile;
-
-  _SourceTile({required this.source, required this.tile});
+  /// [bytes] in a buffer of their own: sending a view to an isolate copies
+  /// the whole buffer behind it.
+  static Uint8List _compact(Uint8List bytes) => bytes.offsetInBytes == 0 &&
+          bytes.lengthInBytes == bytes.buffer.lengthInBytes
+      ? bytes
+      : Uint8List.fromList(bytes);
 }
