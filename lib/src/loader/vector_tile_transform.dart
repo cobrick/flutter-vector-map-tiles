@@ -66,16 +66,34 @@ class _TransformInput {
   });
 }
 
-Tile _apply(_TransformInput input) {
-  final theme = ThemeRepo.themeById[input.themeId]!;
-  final vectorTile =
-      VectorTileReader().read(input.bytes.materialize().asUint8List());
+Tile _apply(_TransformInput input) => decodeVectorTile(
+      ThemeRepo.themeById[input.themeId]!,
+      input.bytes.materialize().asUint8List(),
+      input.translation,
+      input.tileSize,
+    );
+
+/// Decodes the vector tile [bytes] with [theme] and cuts out the part that
+/// [translation] places in this tile.
+Tile decodeVectorTile(
+  Theme theme,
+  Uint8List bytes,
+  TileTranslation translation,
+  double tileSize,
+) {
+  final vectorTile = VectorTileReader().read(bytes);
   final tileData = TileFactory(
     theme,
     const Logger.noop(),
   ).createTileData(vectorTile);
   final translated = TranslationApplier(
-    tileSize: input.tileSize,
-  ).apply(tileData, input.translation);
+    tileSize: tileSize,
+  ).apply(tileData, translation);
   return translated.toTile();
 }
+
+/// A tile with no features, for a source that has no data for it.
+TileData emptyTileData(Theme theme) => TileFactory(
+      theme,
+      const Logger.noop(),
+    ).createTileData(VectorTile(layers: []));

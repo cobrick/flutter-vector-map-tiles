@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:isolate';
 
 import 'package:executor_lib/executor_lib.dart';
 import 'package:flutter/scheduler.dart';
@@ -8,6 +7,7 @@ import 'package:vector_tile_renderer/vector_tile_renderer.dart';
 
 import '../../vector_map_tiles.dart';
 import '../loader/caching_tile_loader.dart';
+import '../loader/encoded_tileset.dart';
 import '../loader/theme_repo.dart';
 import '../model/map_properties.dart';
 import '../model/tile_data_model.dart';
@@ -15,7 +15,7 @@ import 'abstract_map_layer_state.dart';
 
 class MapLayer extends AbstractMapLayer {
   const MapLayer({super.key, required super.mapProperties})
-      : super(tileLoaderFactory: createCachingTileLoader);
+      : super(tileLoaderFactory: createEncodedTileLoader);
 
   @override
   State<StatefulWidget> createState() => MapLayerState();
@@ -67,38 +67,59 @@ class MapLayerState extends AbstractMapLayerState<MapLayer> {
       // multi-level zoom doesn't spend atlas/isolate/GPU work on tiles that are
       // no longer visible.
       if (tile.disposed) return;
-      final tileset = tile.tileset ?? Tileset({});
       final tileID = tile.tile.key();
-      final jobArguments =
-          (widget.mapProperties.theme.id, zoom, tileset, tileID);
-
-      await tilesRenderer.preRenderUi(zoom, tileset, tileID);
-      if (tile.disposed) return;
-      await executor
-          .submit(Job(
-        "pre-render",
-        _preRender(),
-        jobArguments,
-        deduplicationKey:
-            "pre-render:${widget.mapProperties.theme.id}-${widget.mapProperties.theme.version}-$zoom-${tile.tile.key()}",
-      ))
-          .then((renderData) {
+      final zoom = this.zoom;
+      try {
+        var output = await _preRenderOnWorker(
+            tile, zoom, tilesRenderer.preRenderInput(tileID),
+            retry: false);
+        if (output.renderData == null) {
+          // Its labels need glyphs that no atlas holds yet. Generate them
+          // here, on the UI isolate, and lay the tile out again.
+          if (tile.disposed) return;
+          final input = await tilesRenderer.loadGlyphs(output, tileID);
+          if (tile.disposed) return;
+          output = await _preRenderOnWorker(tile, zoom, input, retry: true);
+        }
         if (tile.disposed) return;
-        try {
-          tile.renderData ??= renderData.materialize().asUint8List();
-        } catch (_) {}
-      });
+        tilesRenderer.keepUsedAtlases(output, tileID);
+        tile.renderData ??= output.renderData;
+        // Laid out: the encoded tile is no longer needed.
+        tile.encodedTileset = null;
+      } on CancellationException {
+        // Disposed while its job waited for a worker.
+      }
     });
   }
 
-  TransferableTypedData Function((String, double, Tileset, String) args)
-      _preRender() {
-    final preRenderer = tilesRenderer.getPreRenderer();
-    return ((String, double, Tileset, String) args) {
-      final theme = ThemeRepo.themeById[args.$1]!;
-      return TransferableTypedData.fromList(
-          [preRenderer.call(theme, args.$2, args.$3, args.$4)]);
-    };
+  /// Decodes [tile] and lays it out on one of the executor's isolates. The
+  /// job carries the encoded tile, never a decoded one: copying a decoded
+  /// tile's object graph to an isolate blocks the UI thread for tens of
+  /// milliseconds.
+  Future<PreRenderOutput> _preRenderOnWorker(
+    TileDataModel tile,
+    double zoom,
+    PreRenderInput input, {
+    required bool retry,
+  }) {
+    final theme = widget.mapProperties.theme;
+    final name = retry ? 'pre-render-retry' : 'pre-render';
+    final encoded = tile.encodedTileset;
+    // Without it the tile would be laid out blank, and stay blank.
+    assert(encoded != null, 'MapLayer needs a loader that keeps tiles encoded');
+    return executor.submit(Job(
+      name,
+      _preRenderTile,
+      _PreRenderJob(
+        theme.id,
+        zoom,
+        encoded ?? const EncodedTileset([], tileSize: 256),
+        input,
+      ),
+      cancelled: () => tile.disposed,
+      deduplicationKey:
+          '$name:${theme.id}-${theme.version}-$zoom-${tile.tile.key()}',
+    ));
   }
 
   @override
@@ -203,4 +224,22 @@ extension _TileDataModelUiExtension on TileDataModel {
 
 extension _TileIdExtension on TileIdentity {
   TileId toTileId() => TileId(z: z, x: x, y: y);
+}
+
+/// A tile to lay out on a worker isolate, as plain data.
+class _PreRenderJob {
+  const _PreRenderJob(this.themeId, this.zoom, this.tileset, this.input);
+
+  final String themeId;
+  final double zoom;
+  final EncodedTileset tileset;
+  final PreRenderInput input;
+}
+
+/// Runs on a worker isolate: decodes the tile and lays it out there, so the
+/// decoded tile never crosses isolates. Only the render data comes back.
+PreRenderOutput _preRenderTile(_PreRenderJob job) {
+  final theme = ThemeRepo.themeById[job.themeId]!;
+  return TilesRenderer.preRender(
+      theme, job.zoom, job.tileset.decode(theme), job.input);
 }
