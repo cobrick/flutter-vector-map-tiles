@@ -240,6 +240,9 @@ class _PreRenderJob {
 /// decoded tile never crosses isolates. Only the render data comes back.
 PreRenderOutput _preRenderTile(_PreRenderJob job) {
   final theme = ThemeRepo.themeById[job.themeId]!;
-  return TilesRenderer.preRender(
-      theme, job.zoom, job.tileset.decode(theme), job.input);
+  // Decoding only what the theme draws at this zoom keeps the garbage down:
+  // the workers share their heap with the UI isolate, and every collection
+  // pauses the UI thread too.
+  final tileset = job.tileset.decode(theme, zoom: job.zoom);
+  return TilesRenderer.preRender(theme, job.zoom, tileset, job.input);
 }

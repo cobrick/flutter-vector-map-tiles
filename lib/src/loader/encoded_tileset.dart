@@ -17,9 +17,11 @@ class EncodedTileset {
   final List<EncodedTile> tiles;
   final double tileSize;
 
-  /// Decodes every source tile with [theme].
-  Tileset decode(Theme theme) => Tileset({
-        for (final tile in tiles) tile.source: tile.decode(theme, tileSize),
+  /// Decodes every source tile with [theme]. With [zoom], the zoom the tile
+  /// will be laid out at, only the layers the theme draws at it.
+  Tileset decode(Theme theme, {double? zoom}) => Tileset({
+        for (final tile in tiles)
+          tile.source: tile.decode(theme, tileSize, zoom: zoom),
       });
 }
 
@@ -40,11 +42,11 @@ class EncodedTile {
   /// Where this tile lies in the source tile.
   final TileTranslation translation;
 
-  Tile decode(Theme theme, double tileSize) {
+  Tile decode(Theme theme, double tileSize, {double? zoom}) {
     final bytes = this.bytes;
     if (bytes == null) {
       return emptyTileData(theme).toTile();
     }
-    return decodeVectorTile(theme, bytes, translation, tileSize);
+    return decodeVectorTile(theme, bytes, translation, tileSize, zoom: zoom);
   }
 }

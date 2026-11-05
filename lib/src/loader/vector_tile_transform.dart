@@ -74,18 +74,22 @@ Tile _apply(_TransformInput input) => decodeVectorTile(
     );
 
 /// Decodes the vector tile [bytes] with [theme] and cuts out the part that
-/// [translation] places in this tile.
+/// [translation] places in this tile. With [zoom], the zoom the tile will be
+/// laid out at, only the source layers the theme draws at it are decoded.
 Tile decodeVectorTile(
   Theme theme,
   Uint8List bytes,
   TileTranslation translation,
-  double tileSize,
-) {
-  final vectorTile = VectorTileReader().read(bytes);
-  final tileData = TileFactory(
-    theme,
-    const Logger.noop(),
-  ).createTileData(vectorTile);
+  double tileSize, {
+  double? zoom,
+}) {
+  final factory = TileFactory(theme, const Logger.noop());
+  // Only the layers the theme draws: the rest would be decoded and dropped.
+  final vectorTile = VectorTileReader().read(
+    bytes,
+    layerNames: zoom == null ? factory.layerNames : factory.layerNamesAt(zoom),
+  );
+  final tileData = factory.createTileData(vectorTile);
   final translated = TranslationApplier(
     tileSize: tileSize,
   ).apply(tileData, translation);
