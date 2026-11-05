@@ -85,10 +85,15 @@ abstract class AbstractMapLayerState<T extends AbstractMapLayer>
     }
   }
 
-  void _onAnimationTick(Duration elapsed) {
-    final now = DateTime.now();
+  /// Whether the layer needs another frame although the camera and the tiles
+  /// are still. By default, for one second after the visible tiles change.
+  bool get needsAnimationFrame {
+    final end = _animationEndTime;
+    return end != null && DateTime.now().isBefore(end);
+  }
 
-    if (_animationEndTime != null && now.isBefore(_animationEndTime!)) {
+  void _onAnimationTick(Duration elapsed) {
+    if (needsAnimationFrame) {
       if (mounted) {
         setState(() {});
       }

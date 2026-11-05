@@ -66,16 +66,38 @@ class _TransformInput {
   });
 }
 
-Tile _apply(_TransformInput input) {
-  final theme = ThemeRepo.themeById[input.themeId]!;
-  final vectorTile =
-      VectorTileReader().read(input.bytes.materialize().asUint8List());
-  final tileData = TileFactory(
-    theme,
-    const Logger.noop(),
-  ).createTileData(vectorTile);
+Tile _apply(_TransformInput input) => decodeVectorTile(
+      ThemeRepo.themeById[input.themeId]!,
+      input.bytes.materialize().asUint8List(),
+      input.translation,
+      input.tileSize,
+    );
+
+/// Decodes the vector tile [bytes] with [theme] and cuts out the part that
+/// [translation] places in this tile. With [zoom], the zoom the tile will be
+/// laid out at, only the source layers the theme draws at it are decoded.
+Tile decodeVectorTile(
+  Theme theme,
+  Uint8List bytes,
+  TileTranslation translation,
+  double tileSize, {
+  double? zoom,
+}) {
+  final factory = TileFactory(theme, const Logger.noop());
+  // Only the layers the theme draws: the rest would be decoded and dropped.
+  final vectorTile = VectorTileReader().read(
+    bytes,
+    layerNames: zoom == null ? factory.layerNames : factory.layerNamesAt(zoom),
+  );
+  final tileData = factory.createTileData(vectorTile);
   final translated = TranslationApplier(
-    tileSize: input.tileSize,
-  ).apply(tileData, input.translation);
+    tileSize: tileSize,
+  ).apply(tileData, translation);
   return translated.toTile();
 }
+
+/// A tile with no features, for a source that has no data for it.
+TileData emptyTileData(Theme theme) => TileFactory(
+      theme,
+      const Logger.noop(),
+    ).createTileData(VectorTile(layers: []));

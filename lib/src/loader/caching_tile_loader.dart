@@ -18,3 +18,19 @@ TileLoader createCachingTileLoader(
       cache: CacheTiered(properties: mapProperties.cacheProperties),
       themeRepo: themeRepo,
     );
+
+/// Like [createCachingTileLoader], but leaves vector tiles encoded: the GPU
+/// layer decodes each one on a worker isolate as it lays the tile out.
+TileLoader createEncodedTileLoader(
+  MapProperties mapProperties,
+  Executor executor,
+  ThemeRepo themeRepo,
+) =>
+    DefaultTileLoader(
+      tileSize: 256.0,
+      mapProperties: mapProperties,
+      executor: executor,
+      cache: CacheTiered(properties: mapProperties.cacheProperties),
+      themeRepo: themeRepo,
+      decodeVectorTiles: false,
+    );
