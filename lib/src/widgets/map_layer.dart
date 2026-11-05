@@ -52,6 +52,13 @@ class MapLayerState extends AbstractMapLayerState<MapLayer> {
     }
   }
 
+  /// Draws again only while the renderer still has work that shows on screen
+  /// (tiles held back by its upload budget, labels fading in), instead of
+  /// for a fixed second after every tile change. A layer without labels
+  /// then stops redrawing as soon as its tiles are built.
+  @override
+  bool get needsAnimationFrame => tilesRenderer.needsAnotherFrame;
+
   @override
   Future<void> preRender(TileDataModel tile) {
     return super.preRender(tile).then((_) async {
