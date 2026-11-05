@@ -16,8 +16,16 @@ class TileViewportProvider {
     required this.tileSize,
   });
 
-  TileViewport currentViewport() {
-    final pixelBounds = _tiledPixelBounds();
+  /// The tiles covering the map. [lookAhead] (pixels at the tile zoom, see
+  /// `LookAhead`) widens the bounds on the side the map is moving towards.
+  TileViewport currentViewport({Offset lookAhead = Offset.zero}) {
+    final visible = _tiledPixelBounds();
+    final pixelBounds = Rect.fromLTRB(
+      visible.left + min(lookAhead.dx, 0.0),
+      visible.top + min(lookAhead.dy, 0.0),
+      visible.right + max(lookAhead.dx, 0.0),
+      visible.bottom + max(lookAhead.dy, 0.0),
+    );
     final topLeft = Offset(
       (pixelBounds.left / tileSize).floorToDouble(),
       (pixelBounds.top / tileSize).floorToDouble(),
@@ -37,6 +45,13 @@ class TileViewportProvider {
   }
 
   double tileZoom() => max(1.0, (mapState.zoom + tileOffset.zoomOffset));
+
+  /// The integer zoom of the tiles in use.
+  int get clampedTileZoom => _clampedTileZoom().toInt();
+
+  /// The map centre in pixels at [clampedTileZoom].
+  Offset centreAtTileZoom() =>
+      mapState.projectAtZoom(mapState.center, _clampedTileZoom());
 
   double _clampedTileZoom() => tileZoom().floorToDouble();
 

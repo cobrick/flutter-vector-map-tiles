@@ -7,6 +7,7 @@ import 'package:flutter_map/flutter_map.dart';
 import '../../vector_map_tiles.dart';
 import '../flutter_map/flutter_map_state.dart';
 import '../flutter_map/flutter_map_zoom_scaler.dart';
+import '../layout/look_ahead.dart';
 import '../layout/tile_layout.dart';
 import '../layout/tile_viewport_provider.dart';
 import '../model/map_tiles.dart';
@@ -22,6 +23,10 @@ class FlutterMapAdapter {
   final MapUpdatedCallback mapUpdated;
   double _zoom = 1.0;
   double _rotation = 0.0;
+  // Loads tiles just ahead of a moving map, so they are ready when they
+  // scroll into view instead of starting to load at the screen edge.
+  late final _lookAhead = LookAhead(tileSize: tileSize);
+  final _clock = Stopwatch()..start();
 
   FlutterMapAdapter({
     required this.tileOffset,
@@ -47,7 +52,12 @@ class FlutterMapAdapter {
         tileOffset: tileOffset,
         tileSize: tileSize,
       );
-      final viewport = viewportProvider.currentViewport();
+      final lookAhead = _lookAhead.update(
+        viewportProvider.centreAtTileZoom(),
+        viewportProvider.clampedTileZoom,
+        _clock.elapsed,
+      );
+      final viewport = viewportProvider.currentViewport(lookAhead: lookAhead);
       var layout = TileLayout(
         offset: tileOffset,
         viewport: viewport,
