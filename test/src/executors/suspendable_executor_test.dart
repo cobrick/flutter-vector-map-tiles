@@ -2,9 +2,11 @@ import 'dart:io';
 import 'dart:isolate';
 
 import 'package:executor_lib/executor_lib.dart';
+import 'package:flutter/foundation.dart';
 import 'package:test/test.dart';
 import 'package:vector_map_tiles/src/executors/killable_isolate_executor.dart';
 import 'package:vector_map_tiles/src/executors/suspendable_executor.dart';
+import 'package:vector_map_tiles/src/executors/worker_failure.dart';
 
 import '../mocks/mock_pool_executor.dart';
 
@@ -157,6 +159,105 @@ void main() {
       expect(await setup, 'light, replayed');
     });
 
+    test('a job whose worker fails runs again on the next pool', () async {
+      final pools = MockPools();
+      final executor = SuspendableExecutor(pools.create);
+      final result = executor.submit(_tileJob(7));
+      pools.current.submitted.single
+          .fail(const WorkerFailure('vectorTileWorker1 exited'));
+      await pumpEventQueue();
+
+      executor
+        ..suspend()
+        ..resume();
+      await pumpEventQueue();
+      pools.current.submitted.single.run();
+
+      expect(pools.created.first.jobNames, ['tile']);
+      expect(await result, 14);
+    });
+
+    test(
+      'a job that waits for the next pool drops the waiting jobs that were '
+      'cancelled',
+      () async {
+        final pools = MockPools();
+        final executor = SuspendableExecutor(pools.create);
+        var leftTheView = false;
+        final gone = executor.submit(_tileJob(1, cancelled: () => leftTheView));
+        final dropped = expectLater(
+          gone,
+          throwsA(isA<CancellationException>()),
+        );
+        final visible = executor.submit(_tileJob(2));
+        const workerExited = WorkerFailure('vectorTileWorker1 exited');
+        pools.current.submitted.first.fail(workerExited);
+        await pumpEventQueue();
+        leftTheView = true;
+
+        pools.current.submitted.last.fail(workerExited);
+        await dropped;
+
+        executor
+          ..suspend()
+          ..resume();
+        await pumpEventQueue();
+        expect(pools.current.jobNames, ['tile']);
+        pools.current.submitted.single.run();
+        expect(await visible, 4);
+      },
+    );
+
+    test('a job that fails on a live worker fails its caller', () async {
+      final pools = MockPools();
+      final executor = SuspendableExecutor(pools.create);
+      final result = executor.submit(_tileJob(7));
+
+      pools.current.submitted.single.fail(StateError('broken tile'));
+
+      await expectLater(result, throwsA(isA<StateError>()));
+    });
+
+    test('a setup counts as done once a live worker has run it', () async {
+      final pools = MockPools(workersPerPool: 2);
+      final executor = SuspendableExecutor(pools.create);
+      final setup = executor.submitAll(_setupJob('light')).single;
+
+      pools.current.submitted.first
+          .fail(const WorkerFailure('vectorTileWorker1 failed to spawn'));
+      pools.current.submitted.last.run();
+
+      expect(await setup, 'light');
+    });
+
+    test('a setup that fails with its own error on a worker fails', () async {
+      final pools = MockPools(workersPerPool: 2);
+      final executor = SuspendableExecutor(pools.create);
+      final setup = executor.submitAll(_setupJob('light')).single;
+
+      pools.current.submitted.first.run();
+      pools.current.submitted.last.fail(StateError('broken theme'));
+
+      await expectLater(setup, throwsA(isA<StateError>()));
+    });
+
+    test('a setup no worker could run runs again on the next pool', () async {
+      final pools = MockPools();
+      final executor = SuspendableExecutor(pools.create);
+      final setup = executor.submitAll(_setupJob('light')).single;
+      pools.current.submitted.single
+          .fail(const WorkerFailure('vectorTileWorker1 exited'));
+      await pumpEventQueue();
+
+      executor
+        ..suspend()
+        ..resume();
+      await pumpEventQueue();
+      pools.current.submitted.single.run();
+
+      expect(await setup, 'light');
+    });
+
     test('dispose cancels queued jobs', () async {
       final pools = MockPools();
       final executor = SuspendableExecutor(pools.create)..suspend();
@@ -252,16 +353,23 @@ void main() {
     );
 
     test(
-      'jobs waiting for a replay settle when its workers die',
+      'jobs waiting for a replay run on the next pool when its workers die',
       () async {
         final crashMarker = File(
           '${Directory.systemTemp.createTempSync('replay').path}/crash',
         );
         addTearDown(() => crashMarker.parent.deleteSync(recursive: true));
+        final reported = <FlutterErrorDetails>[];
+        final reportError = FlutterError.onError;
+        FlutterError.onError = reported.add;
+        addTearDown(() => FlutterError.onError = reportError);
+        final exits = ReceivePort();
+        addTearDown(exits.close);
         final executor = SuspendableExecutor(
           () => PoolExecutor(
             concurrency: 2,
-            executorFactory: KillableIsolateExecutor.new,
+            executorFactory: () =>
+                KillableIsolateExecutor(onExit: exits.sendPort),
           ),
         );
         addTearDown(executor.dispose);
@@ -275,26 +383,25 @@ void main() {
             ),
           ),
         );
+        final killedThenCrashed = exits.take(4).toList();
         crashMarker.createSync();
         executor.suspend();
         final waiting = executor.submit(
           Job('theme', _themeOf, 'light', deduplicationKey: null),
         );
-
         executor.resume();
+        await killedThenCrashed;
+        await pumpEventQueue();
 
-        await expectLater(
-          waiting,
-          throwsA(
-            isA<StateError>().having(
-              (error) => error.message,
-              'message',
-              endsWith(' exited'),
-            ),
-          ),
-        );
+        crashMarker.deleteSync();
+        executor
+          ..suspend()
+          ..resume();
+
+        expect(await waiting, 'theme light');
+        expect(reported, hasLength(2));
       },
-      timeout: const Timeout(Duration(seconds: 10)),
+      timeout: const Timeout(Duration(seconds: 20)),
     );
 
     test('creates no pool until a job or a resume needs one', () {

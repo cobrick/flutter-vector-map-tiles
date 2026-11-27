@@ -2,8 +2,10 @@ import 'dart:async';
 import 'dart:isolate';
 
 import 'package:executor_lib/executor_lib.dart';
+import 'package:flutter/foundation.dart';
 import 'package:test/test.dart';
 import 'package:vector_map_tiles/src/executors/killable_isolate_executor.dart';
+import 'package:vector_map_tiles/src/executors/worker_failure.dart';
 
 String? _isolateName(Object? _) => Isolate.current.debugName;
 
@@ -52,15 +54,32 @@ Future<KillableIsolateExecutor> _readyExecutor() async {
 }
 
 final _workerExited = throwsA(
-  isA<StateError>().having(
-    (error) => error.message,
+  isA<WorkerFailure>().having(
+    (failure) => failure.message,
     'message',
     endsWith(' exited'),
   ),
 );
 
+final _spawnFailed = throwsA(
+  isA<WorkerFailure>().having(
+    (failure) => failure.cause,
+    'cause',
+    isA<IsolateSpawnException>(),
+  ),
+);
+
 void main() {
   group('KillableIsolateExecutor', () {
+    late List<FlutterErrorDetails> reported;
+
+    setUp(() {
+      reported = [];
+      final reportError = FlutterError.onError;
+      FlutterError.onError = reported.add;
+      addTearDown(() => FlutterError.onError = reportError);
+    });
+
     test('runs a job in its own isolate and returns the result', () async {
       final executor = KillableIsolateExecutor();
       addTearDown(executor.dispose);
@@ -136,15 +155,61 @@ void main() {
     test('a failed spawn fails the queued jobs and every later one', () async {
       final executor = KillableIsolateExecutor(spawn: _failToSpawn);
       addTearDown(executor.dispose);
-      final spawnFailed = throwsA(isA<IsolateSpawnException>());
 
       final queued = executor.submit(_doubleJob(21));
-      await expectLater(queued, spawnFailed);
+      await expectLater(queued, _spawnFailed);
       final later = executor.submit(_doubleJob(21));
 
-      expect(executor.outstanding, 0);
-      await expectLater(later, spawnFailed);
+      await expectLater(later, _spawnFailed);
     });
+
+    test('a failed worker reports its failure once', () async {
+      final executor = KillableIsolateExecutor(spawn: _failToSpawn);
+      addTearDown(executor.dispose);
+
+      await expectLater(executor.submit(_doubleJob(1)), _spawnFailed);
+      await expectLater(executor.submit(_doubleJob(2)), _spawnFailed);
+
+      expect(
+        reported.map((details) => details.exception),
+        [isA<WorkerFailure>()],
+      );
+    });
+
+    test('a disposed worker reports nothing', () async {
+      final exits = ReceivePort();
+      final executor = KillableIsolateExecutor(onExit: exits.sendPort);
+      await executor.submit(_doubleJob(1));
+
+      executor.dispose();
+      await exits.first;
+      await pumpEventQueue();
+
+      expect(reported, isEmpty);
+    });
+
+    test(
+      'a pool sends every job to the live worker once the other has failed',
+      () async {
+        var spawned = 0;
+        final pool = PoolExecutor(
+          concurrency: 2,
+          executorFactory: () => spawned++ == 0
+              ? KillableIsolateExecutor(spawn: _failToSpawn)
+              : KillableIsolateExecutor(),
+        );
+        addTearDown(pool.dispose);
+        await pumpEventQueue();
+
+        final results = await Future.wait([
+          for (var value = 1; value <= 6; value++)
+            pool.submit(_doubleJob(value)),
+        ]);
+
+        expect(results, [2, 4, 6, 8, 10, 12]);
+      },
+      timeout: const Timeout(Duration(seconds: 10)),
+    );
 
     test(
       'an unexpected worker exit fails the running and queued jobs',
@@ -170,14 +235,14 @@ void main() {
 
         final next = executor.submit(_doubleJob(21));
 
-        expect(executor.outstanding, 0);
         await expectLater(next, _workerExited);
       },
       timeout: const Timeout(Duration(seconds: 10)),
     );
 
     test(
-      'a worker that dies of an uncaught error fails its job with that error',
+      'a worker that dies of an uncaught error fails its job with a '
+      'WorkerFailure carrying that error',
       () async {
         final executor = KillableIsolateExecutor();
         addTearDown(executor.dispose);
@@ -189,10 +254,14 @@ void main() {
         await expectLater(
           running,
           throwsA(
-            isA<RemoteError>().having(
-              (error) => error.toString(),
-              'error',
-              contains('worker crashed'),
+            isA<WorkerFailure>().having(
+              (failure) => failure.cause,
+              'cause',
+              isA<RemoteError>().having(
+                (error) => error.toString(),
+                'error',
+                contains('worker crashed'),
+              ),
             ),
           ),
         );

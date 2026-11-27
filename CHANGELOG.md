@@ -1,7 +1,7 @@
 ## Unreleased
 
 * Stops the tile worker isolates while the app is not resumed (`inactive`, `hidden`, `paused`) and starts new ones on `resumed`. Android destroys an Activity without disposing its widgets, so workers that only stopped on `dispose()` outlived the engine and kept its isolate group alive. Jobs in flight when the workers stop run again on the new ones, after the theme setup is replayed there.
-* A worker isolate that fails to spawn, exits or dies of an uncaught error fails its running and queued jobs with that error, and every job sent to it later, instead of leaving them pending. A replay on resume therefore always settles, and the jobs waiting for it run or fail.
+* A worker isolate that fails to spawn, exits or dies of an uncaught error fails its running and queued jobs, and every job sent to it later, with a `WorkerFailure` instead of leaving them pending, and reports itself fully loaded, so the pool sends new jobs to the workers still alive. A worker's failure isn't its jobs' failure: they run again on the next pool, after the next resume. A theme setup counts as done once the workers still alive have run it; if none could, the next replay runs it again. A replay on resume therefore always settles. Each failed worker is reported once through `FlutterError.reportError`, and waiting jobs whose tiles were cancelled are dropped as soon as another job joins them.
 * A worker reply whose value doesn't match the job's result type fails that job with a `TypeError`; the worker goes on with the next job.
 * A layer built while the app is not resumed spawns no worker isolates; the pool is created on the first job or on `resumed`.
 
