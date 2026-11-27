@@ -2,6 +2,7 @@ import 'package:executor_lib/executor_lib.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:vector_map_tiles/src/cache/cache.dart';
+import 'package:vector_map_tiles/src/executors/suspendable_executor.dart';
 import 'package:vector_map_tiles/src/loader/no_op_tile_loader.dart';
 import 'package:vector_map_tiles/src/model/map_properties.dart';
 import 'package:vector_map_tiles/src/widgets/abstract_map_layer_state.dart';
@@ -9,6 +10,7 @@ import 'package:vector_map_tiles/vector_map_tiles.dart';
 import 'package:vector_tile_renderer/vector_tile_renderer.dart';
 
 import '../mocks/mock_lifecycle_aware_executor.dart';
+import '../mocks/mock_pool_executor.dart';
 
 final _mapProperties = MapProperties(
   tileProviders: const TileProviders({}),
@@ -30,7 +32,7 @@ class _Layer extends AbstractMapLayer {
               const NoOpTileLoader(),
         );
 
-  final MockLifecycleAwareExecutor executor;
+  final Executor executor;
 
   @override
   State<_Layer> createState() => _LayerState();
@@ -133,13 +135,16 @@ void main() {
     testWidgets('a layer built while the app is paused starts suspended',
         (tester) async {
       _moveAppTo(tester, AppLifecycleState.paused);
-      final executor = MockLifecycleAwareExecutor();
+      final pools = MockPools();
+      final executor = SuspendableExecutor(pools.create);
 
       await _pumpWhileFramesAreDisabled(tester, _Layer(executor));
 
       expect(executor.isSuspended, isTrue);
+      expect(pools.created, isEmpty);
       _moveAppTo(tester, AppLifecycleState.resumed);
       expect(executor.isSuspended, isFalse);
+      expect(pools.created, hasLength(1));
     });
   });
 }

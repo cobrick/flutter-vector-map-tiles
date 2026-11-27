@@ -3,20 +3,34 @@ import 'dart:isolate';
 
 import 'package:executor_lib/executor_lib.dart';
 
+typedef IsolateSpawner = Future<Isolate> Function(
+  void Function(SendPort replies) entryPoint,
+  SendPort replies, {
+  bool paused,
+  SendPort? onExit,
+  String? debugName,
+});
+
 class KillableIsolateExecutor extends ExecutorDelegate {
-  KillableIsolateExecutor({SendPort? onExit}) {
+  KillableIsolateExecutor({
+    SendPort? onExit,
+    IsolateSpawner spawn = Isolate.spawn,
+  }) {
     _replies.listen(_onReply);
-    _spawn(onExit);
+    _start(spawn, onExit);
   }
 
   static var _spawnedWorkers = 0;
 
+  final _name = 'vectorTileWorker${++_spawnedWorkers}';
   final _replies = ReceivePort();
   final _jobs = <int, _WorkerJob>{};
   final _queue = <_WorkerJob>[];
   _WorkerJob? _running;
   SendPort? _requests;
   Isolate? _isolate;
+  RemoteError? _uncaughtError;
+  (Object, StackTrace)? _failure;
   var _nextKey = 0;
   var _disposed = false;
 
@@ -38,6 +52,9 @@ class KillableIsolateExecutor extends ExecutorDelegate {
     if (_disposed) {
       return Future.error(CancellationException());
     }
+    if (_failure case (final error, final stackTrace)) {
+      return Future.error(error, stackTrace);
+    }
     final queued = _WorkerJob(_nextKey++, job);
     _jobs[queued.key] = queued;
     _queue.add(queued);
@@ -54,34 +71,42 @@ class KillableIsolateExecutor extends ExecutorDelegate {
       return;
     }
     _disposed = true;
-    _isolate?.kill(priority: Isolate.immediate);
-    _replies.close();
-    for (final job in _jobs.values) {
-      job.cancel();
-    }
-    _jobs.clear();
-    _queue.clear();
-    _running = null;
+    _stop((job) => job.cancel());
   }
 
-  Future<void> _spawn(SendPort? onExit) async {
-    final isolate = await Isolate.spawn(
-      _serveJobs,
-      _replies.sendPort,
-      onExit: onExit,
-      debugName: 'vectorTileWorker${++_spawnedWorkers}',
-    );
-    _isolate = isolate;
-    if (_disposed) {
-      isolate.kill(priority: Isolate.immediate);
+  Future<void> _start(IsolateSpawner spawn, SendPort? onExit) async {
+    try {
+      final isolate = await spawn(
+        _serveJobs,
+        _replies.sendPort,
+        paused: true,
+        onExit: onExit,
+        debugName: _name,
+      );
+      _isolate = isolate;
+      if (_disposed) {
+        isolate.kill(priority: Isolate.immediate);
+        return;
+      }
+      isolate
+        ..addOnExitListener(_replies.sendPort)
+        ..addErrorListener(_replies.sendPort)
+        ..resume(isolate.pauseCapability!);
+    } catch (error, stackTrace) {
+      _fail(error, stackTrace);
     }
   }
 
   void _onReply(Object? reply) {
-    if (_disposed) {
+    if (_disposed || _failure != null) {
       return;
     }
     switch (reply) {
+      case null:
+        _failOnExit();
+        return;
+      case [final String error, final String? stackTrace]:
+        _uncaughtError = RemoteError(error, stackTrace ?? '');
       case final SendPort requests:
         _requests = requests;
       case _JobResult(:final key, :final value):
@@ -95,6 +120,33 @@ class KillableIsolateExecutor extends ExecutorDelegate {
         _jobs.remove(key)?.fail(error, stackTrace);
     }
     _sendNext();
+  }
+
+  void _failOnExit() {
+    if (_uncaughtError case final error?) {
+      _fail(error, error.stackTrace);
+    } else {
+      _fail(StateError('$_name exited'), StackTrace.current);
+    }
+  }
+
+  void _fail(Object error, StackTrace stackTrace) {
+    if (_disposed || _failure != null) {
+      return;
+    }
+    _failure = (error, stackTrace);
+    _stop((job) => job.fail(error, stackTrace));
+  }
+
+  void _stop(void Function(_WorkerJob job) settle) {
+    _isolate?.kill(priority: Isolate.immediate);
+    _replies.close();
+    for (final job in _jobs.values) {
+      settle(job);
+    }
+    _jobs.clear();
+    _queue.clear();
+    _running = null;
   }
 
   void _sendNext() {
@@ -128,7 +180,7 @@ class KillableIsolateExecutor extends ExecutorDelegate {
     });
   }
 
-  void _completeDuplicates(_WorkerJob done, dynamic value) {
+  void _completeDuplicates(_WorkerJob done, Object? value) {
     final deduplicationKey = done.job.deduplicationKey;
     if (deduplicationKey == null) {
       return;
@@ -150,19 +202,21 @@ class _WorkerJob<Q, R> {
 
   final int key;
   final Job<Q, R> job;
-  final _completer = Completer<R>();
+  final _completer = Completer<dynamic>();
 
-  Future<R> get future => _completer.future;
+  Future<R> get future => _completer.future.then(_asResult);
 
   _JobRequest<Q, R> get request =>
       _JobRequest(key, job.computeFunction, job.value);
 
-  void complete(dynamic value) => _completer.complete(value);
+  void complete(Object? value) => _completer.complete(value);
 
   void fail(Object error, StackTrace stackTrace) =>
       _completer.completeError(error, stackTrace);
 
   void cancel() => _completer.completeError(CancellationException());
+
+  R _asResult(dynamic value) => value;
 }
 
 class _JobRequest<Q, R> {

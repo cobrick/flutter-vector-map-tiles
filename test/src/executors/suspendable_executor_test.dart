@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'dart:isolate';
 
 import 'package:executor_lib/executor_lib.dart';
@@ -15,6 +16,13 @@ final _themeById = <String, String>{};
 
 void _setUpTheme(String themeId) => _themeById[themeId] = 'theme $themeId';
 
+void _setUpThemeUnlessMarked(String crashMarkerPath) {
+  if (File(crashMarkerPath).existsSync()) {
+    Isolate.exit();
+  }
+  _setUpTheme('light');
+}
+
 String? _themeOf(String themeId) => _themeById[themeId];
 
 Job<int, int> _tileJob(int value, {bool Function()? cancelled}) =>
@@ -31,7 +39,7 @@ void main() {
 
       final result = executor.submit(_tileJob(7));
       await pumpEventQueue();
-      expect(pools.created.single.submitted, isEmpty);
+      expect(pools.created, isEmpty);
 
       executor.resume();
       await pumpEventQueue();
@@ -71,6 +79,58 @@ void main() {
       final result = executor.submit(_tileJob(7));
 
       executor.resume();
+      await pumpEventQueue();
+      expect(pools.current.jobNames, ['setup']);
+      pools.current.submitted.single.run();
+      await pumpEventQueue();
+
+      expect(pools.current.jobNames, ['setup', 'tile']);
+      pools.current.submitted.last.run();
+      expect(await result, 14);
+    });
+
+    test(
+      'a job waiting through an interrupted replay runs once on the next pool '
+      'and its future gets that result',
+      () async {
+        final pools = MockPools();
+        final executor = SuspendableExecutor(pools.create);
+        final setup = executor.submitAll(_setupJob('light'));
+        pools.current.submitted.single.run();
+        await Future.wait(setup);
+        executor.suspend();
+        final result = executor.submit(_tileJob(7));
+        executor.resume();
+        await pumpEventQueue();
+
+        executor.suspend();
+        await pumpEventQueue();
+        executor.resume();
+        await pumpEventQueue();
+        pools.current.submitted.single.run();
+        await pumpEventQueue();
+
+        expect(pools.created, hasLength(3));
+        expect(pools.created[1].jobNames, ['setup']);
+        expect(pools.current.jobNames, ['setup', 'tile']);
+        pools.current.submitted.last.complete(42);
+        expect(await result, 42);
+      },
+    );
+
+    test('a job submitted while the replay runs waits until it settles',
+        () async {
+      final pools = MockPools();
+      final executor = SuspendableExecutor(pools.create);
+      final setup = executor.submitAll(_setupJob('light'));
+      pools.current.submitted.single.run();
+      await Future.wait(setup);
+      executor
+        ..suspend()
+        ..resume();
+      await pumpEventQueue();
+
+      final result = executor.submit(_tileJob(7));
       await pumpEventQueue();
       expect(pools.current.jobNames, ['setup']);
       pools.current.submitted.single.run();
@@ -190,5 +250,66 @@ void main() {
       },
       timeout: const Timeout(Duration(seconds: 20)),
     );
+
+    test(
+      'jobs waiting for a replay settle when its workers die',
+      () async {
+        final crashMarker = File(
+          '${Directory.systemTemp.createTempSync('replay').path}/crash',
+        );
+        addTearDown(() => crashMarker.parent.deleteSync(recursive: true));
+        final executor = SuspendableExecutor(
+          () => PoolExecutor(
+            concurrency: 2,
+            executorFactory: KillableIsolateExecutor.new,
+          ),
+        );
+        addTearDown(executor.dispose);
+        await Future.wait(
+          executor.submitAll(
+            Job(
+              'setup',
+              _setUpThemeUnlessMarked,
+              crashMarker.path,
+              deduplicationKey: 'light',
+            ),
+          ),
+        );
+        crashMarker.createSync();
+        executor.suspend();
+        final waiting = executor.submit(
+          Job('theme', _themeOf, 'light', deduplicationKey: null),
+        );
+
+        executor.resume();
+
+        await expectLater(
+          waiting,
+          throwsA(
+            isA<StateError>().having(
+              (error) => error.message,
+              'message',
+              endsWith(' exited'),
+            ),
+          ),
+        );
+      },
+      timeout: const Timeout(Duration(seconds: 10)),
+    );
+
+    test('creates no pool until a job or a resume needs one', () {
+      final pools = MockPools();
+      final executor = SuspendableExecutor(pools.create);
+      expect(pools.created, isEmpty);
+
+      executor
+        ..suspend()
+        ..submitAll(_setupJob('light'))
+        ..submit(_tileJob(7));
+      expect(pools.created, isEmpty);
+      executor.resume();
+
+      expect(pools.created, hasLength(1));
+    });
   });
 }
