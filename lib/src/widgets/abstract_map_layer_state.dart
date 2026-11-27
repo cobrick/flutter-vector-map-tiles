@@ -5,6 +5,7 @@ import 'package:flutter/scheduler.dart';
 import 'package:flutter/widgets.dart';
 
 import '../executors/executors_std.dart';
+import '../executors/lifecycle_aware_executor.dart';
 import '../loader/theme_repo.dart';
 import '../loader/tile_loader.dart';
 import '../model/map_properties.dart';
@@ -28,6 +29,7 @@ abstract class AbstractMapLayerState<T extends AbstractMapLayer>
     extends State<T>
     with SingleTickerProviderStateMixin {
   late final Executor executor;
+  late final AppLifecycleListener _lifecycleListener;
   late TileLoader tileLoader;
   late MapTiles mapTiles;
   FlutterMapAdapter? _mapAdapter;
@@ -37,6 +39,7 @@ abstract class AbstractMapLayerState<T extends AbstractMapLayer>
   @override
   void dispose() {
     _animationTicker?.dispose();
+    _lifecycleListener.dispose();
     executor.dispose();
     _mapAdapter?.dispose();
     super.dispose();
@@ -120,13 +123,31 @@ abstract class AbstractMapLayerState<T extends AbstractMapLayer>
   @override
   void initState() {
     super.initState();
-    executor = newConcurrentExecutor(
-      concurrency: widget.mapProperties.concurrency,
+    executor = createExecutor();
+    _lifecycleListener = AppLifecycleListener(
+      onStateChange: _followAppLifecycle,
     );
+    if (WidgetsBinding.instance.lifecycleState case final state?) {
+      _followAppLifecycle(state);
+    }
     tileLoader = _createTileLoader();
     mapTiles = MapTiles(tileLoader: tileLoader);
     _mapAdapter ??= _createMapAdapter(mapTiles);
     mapTiles.addListener(_updateTiles);
+  }
+
+  @visibleForTesting
+  Executor createExecutor() =>
+      newConcurrentExecutor(concurrency: widget.mapProperties.concurrency);
+
+  void _followAppLifecycle(AppLifecycleState state) {
+    if (executor case final LifecycleAwareExecutor workers) {
+      if (state == AppLifecycleState.resumed) {
+        workers.resume();
+      } else {
+        workers.suspend();
+      }
+    }
   }
 
   TileLoader _createTileLoader() => widget.tileLoaderFactory(

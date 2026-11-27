@@ -1,3 +1,7 @@
+## Unreleased
+
+* Stops the tile worker isolates while the app is not resumed (`inactive`, `hidden`, `paused`) and starts new ones on `resumed`. Android destroys an Activity without disposing its widgets, so workers that only stopped on `dispose()` outlived the engine and kept its isolate group alive. Jobs in flight when the workers stop run again on the new ones, after the theme setup is replayed there.
+
 ## 10.0.0-beta.2
 
 * Adds full GPU rendering support for `flutter_map`, delivering smoother animations, higher frame rates, and improved efficiency.
