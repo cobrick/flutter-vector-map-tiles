@@ -5,6 +5,7 @@ import 'package:flutter/scheduler.dart';
 import 'package:flutter/widgets.dart';
 
 import '../executors/executors_std.dart';
+import '../executors/lifecycle_aware_executor.dart';
 import '../loader/theme_repo.dart';
 import '../loader/tile_loader.dart';
 import '../model/map_properties.dart';
@@ -15,7 +16,7 @@ import 'flutter_map_adapter.dart';
 abstract class AbstractMapLayer extends StatefulWidget {
   final MapProperties mapProperties;
   final TileLoader Function(MapProperties, Executor, ThemeRepo)
-      tileLoaderFactory;
+  tileLoaderFactory;
 
   const AbstractMapLayer({
     super.key,
@@ -25,10 +26,12 @@ abstract class AbstractMapLayer extends StatefulWidget {
 }
 
 abstract class AbstractMapLayerState<T extends AbstractMapLayer>
-    extends State<T> with SingleTickerProviderStateMixin {
+    extends State<T>
+    with SingleTickerProviderStateMixin {
   late final Executor executor;
-  late final TileLoader tileLoader;
-  late final MapTiles mapTiles;
+  late final AppLifecycleListener _lifecycleListener;
+  late TileLoader tileLoader;
+  late MapTiles mapTiles;
   FlutterMapAdapter? _mapAdapter;
   Ticker? _animationTicker;
   DateTime? _animationEndTime;
@@ -36,6 +39,7 @@ abstract class AbstractMapLayerState<T extends AbstractMapLayer>
   @override
   void dispose() {
     _animationTicker?.dispose();
+    _lifecycleListener.dispose();
     executor.dispose();
     _mapAdapter?.dispose();
     super.dispose();
@@ -50,8 +54,10 @@ abstract class AbstractMapLayerState<T extends AbstractMapLayer>
   }
 
   void _updateTiles() {
-    for (final tile in mapTiles.tileModels.where((model) =>
-        model.isLoaded && !model.isDisplayReady && !model.preRenderStarted)) {
+    for (final tile in mapTiles.tileModels.where(
+      (model) =>
+          model.isLoaded && !model.isDisplayReady && !model.preRenderStarted,
+    )) {
       preRender(tile).then((_) {
         if (mounted) {
           setState(() {
@@ -82,10 +88,15 @@ abstract class AbstractMapLayerState<T extends AbstractMapLayer>
     }
   }
 
-  void _onAnimationTick(Duration elapsed) {
-    final now = DateTime.now();
+  /// Whether the layer needs another frame although the camera and the tiles
+  /// are still. By default, for one second after the visible tiles change.
+  bool get needsAnimationFrame {
+    final end = _animationEndTime;
+    return end != null && DateTime.now().isBefore(end);
+  }
 
-    if (_animationEndTime != null && now.isBefore(_animationEndTime!)) {
+  void _onAnimationTick(Duration elapsed) {
+    if (needsAnimationFrame) {
       if (mounted) {
         setState(() {});
       }
@@ -96,12 +107,15 @@ abstract class AbstractMapLayerState<T extends AbstractMapLayer>
   }
 
   Future<void> preRender(TileDataModel tile) => Future.sync(() {
-        tile.preRenderStarted = true;
-      });
+    tile.preRenderStarted = true;
+  });
 
   void resetState() {
+    _mapAdapter?.dispose();
     mapTiles.dispose();
+    tileLoader = _createTileLoader();
     mapTiles = MapTiles(tileLoader: tileLoader);
+    _mapAdapter = _createMapAdapter(mapTiles);
     mapTiles.addListener(_updateTiles);
     setState(() {});
   }
@@ -109,18 +123,45 @@ abstract class AbstractMapLayerState<T extends AbstractMapLayer>
   @override
   void initState() {
     super.initState();
-    executor = newConcurrentExecutor(
-      concurrency: widget.mapProperties.concurrency,
+    executor = createExecutor();
+    _lifecycleListener = AppLifecycleListener(
+      onStateChange: _followAppLifecycle,
     );
-    tileLoader =
-        widget.tileLoaderFactory(widget.mapProperties, executor, ThemeRepo());
+    if (WidgetsBinding.instance.lifecycleState case final state?) {
+      _followAppLifecycle(state);
+    }
+    tileLoader = _createTileLoader();
     mapTiles = MapTiles(tileLoader: tileLoader);
-    _mapAdapter ??= FlutterMapAdapter(
-      mapTiles: mapTiles,
+    _mapAdapter ??= _createMapAdapter(mapTiles);
+    mapTiles.addListener(_updateTiles);
+  }
+
+  @visibleForTesting
+  Executor createExecutor() =>
+      newConcurrentExecutor(concurrency: widget.mapProperties.concurrency);
+
+  void _followAppLifecycle(AppLifecycleState state) {
+    if (executor case final LifecycleAwareExecutor workers) {
+      if (state == AppLifecycleState.resumed) {
+        workers.resume();
+      } else {
+        workers.suspend();
+      }
+    }
+  }
+
+  TileLoader _createTileLoader() => widget.tileLoaderFactory(
+    widget.mapProperties,
+    executor,
+    ThemeRepo(),
+  );
+
+  FlutterMapAdapter _createMapAdapter(MapTiles targetMapTiles) {
+    return FlutterMapAdapter(
+      mapTiles: targetMapTiles,
       mapUpdated: _mapUpdated,
       tileOffset: widget.mapProperties.tileOffset,
     );
-    mapTiles.addListener(_updateTiles);
   }
 
   void _mapUpdated() {

@@ -105,12 +105,14 @@ class _Positioner {
     final toBottomPosition = _tileOffset(
       TileIdentity(tile.z, tile.x, tile.y + 1),
     );
-    const tileOverlap = 1.0;
+    // Exact tile rects. Neighbouring tiles share their edges, so the GPU
+    // renderer leaves no cracks between them; the former 1 px overlap made
+    // translucent layers (water, woods) blend twice along every tile seam.
     final position = Rect.fromLTRB(
       offset.dx,
       offset.dy,
-      toRightPosition.dx + tileOverlap,
-      toBottomPosition.dy + tileOverlap,
+      toRightPosition.dx,
+      toBottomPosition.dy,
     );
     return TilePosition(tile: tile.wrapped(), position: position);
   }
