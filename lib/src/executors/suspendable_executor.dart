@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:executor_lib/executor_lib.dart';
 
 import 'lifecycle_aware_executor.dart';
+import 'worker_failure.dart';
 
 class SuspendableExecutor implements LifecycleAwareExecutor {
   SuspendableExecutor(this._createPool);
@@ -29,7 +30,7 @@ class SuspendableExecutor implements LifecycleAwareExecutor {
     }
     final pending = _PendingJob(job, onEveryWorker: false);
     if (_suspended || _replaying) {
-      _waiting.add(pending);
+      _wait(pending);
     } else {
       _run(pending, _livePool());
     }
@@ -118,29 +119,44 @@ class SuspendableExecutor implements LifecycleAwareExecutor {
 
   void _run(_PendingJob job, Executor pool) {
     _running.add(job);
-    job.runOn(pool).then((settled) {
-      if (settled) {
-        _running.remove(job);
+    job.runOn(pool).then((outcome) {
+      if (outcome == _Outcome.superseded || !_running.remove(job)) {
+        return;
+      }
+      if (outcome == _Outcome.workerFailed) {
+        _wait(job);
       }
     });
   }
+
+  void _wait(_PendingJob job) {
+    _dropCancelledWaiting();
+    _waiting.add(job);
+  }
+
+  void _dropCancelledWaiting() => _waiting.removeWhere((job) {
+        if (!job.isCancelled) {
+          return false;
+        }
+        job.cancel();
+        return true;
+      });
 
   void _runWaiting(Executor pool) {
     if (!identical(pool, _pool)) {
       return;
     }
     _replaying = false;
+    _dropCancelledWaiting();
     final waiting = [..._waiting];
     _waiting.clear();
     for (final job in waiting) {
-      if (job.isCancelled) {
-        job.cancel();
-      } else {
-        _run(job, pool);
-      }
+      _run(job, pool);
     }
   }
 }
+
+enum _Outcome { settled, workerFailed, superseded }
 
 class _PendingJob<Q, R> {
   _PendingJob(this.job, {required this.onEveryWorker});
@@ -156,12 +172,13 @@ class _PendingJob<Q, R> {
 
   bool get isCancelled => job.isCancelled;
 
-  Future<bool> runOn(Executor pool) {
+  Future<_Outcome> runOn(Executor pool) {
     final attempt = _attempt = Object();
     return _submitTo(pool).then(
       (result) => _settle(attempt, () => _completer.complete(result)),
-      onError: (Object error, StackTrace stackTrace) =>
-          _settle(attempt, () => _completer.completeError(error, stackTrace)),
+      onError: (Object error, StackTrace stackTrace) => error is WorkerFailure
+          ? _awaitNextPool(attempt)
+          : _settle(attempt, () => _completer.completeError(error, stackTrace)),
     );
   }
 
@@ -175,16 +192,46 @@ class _PendingJob<Q, R> {
   }
 
   Future<R> _submitTo(Executor pool) => Future.sync(
-        () => onEveryWorker
-            ? Future.wait(pool.submitAll(job)).then((results) => results.first)
-            : pool.submit(job),
+        () => onEveryWorker ? _submitToEveryWorker(pool) : pool.submit(job),
       );
 
-  bool _settle(Object attempt, void Function() complete) {
-    if (!identical(attempt, _attempt) || isCompleted) {
-      return false;
+  Future<R> _submitToEveryWorker(Executor pool) async {
+    final failures = <WorkerFailure>[];
+    final results = await Future.wait([
+      for (final result in pool.submitAll(job))
+        result.then<(R,)?>(
+          (value) => (value,),
+          onError: (Object error, StackTrace stackTrace) {
+            if (error case final WorkerFailure failure) {
+              failures.add(failure);
+              return null;
+            }
+            Error.throwWithStackTrace(error, stackTrace);
+          },
+        ),
+    ]);
+    if (results.nonNulls.firstOrNull case (final value,)) {
+      return value;
+    }
+    throw failures.first;
+  }
+
+  _Outcome _settle(Object attempt, void Function() complete) {
+    if (!_isCurrent(attempt)) {
+      return _Outcome.superseded;
     }
     complete();
-    return true;
+    return _Outcome.settled;
   }
+
+  _Outcome _awaitNextPool(Object attempt) {
+    if (!_isCurrent(attempt)) {
+      return _Outcome.superseded;
+    }
+    _attempt = null;
+    return _Outcome.workerFailed;
+  }
+
+  bool _isCurrent(Object attempt) =>
+      identical(attempt, _attempt) && !isCompleted;
 }

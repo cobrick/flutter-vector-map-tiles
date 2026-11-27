@@ -2,6 +2,9 @@ import 'dart:async';
 import 'dart:isolate';
 
 import 'package:executor_lib/executor_lib.dart';
+import 'package:flutter/foundation.dart';
+
+import 'worker_failure.dart';
 
 typedef IsolateSpawner = Future<Isolate> Function(
   void Function(SendPort replies) entryPoint,
@@ -21,6 +24,7 @@ class KillableIsolateExecutor extends ExecutorDelegate {
   }
 
   static var _spawnedWorkers = 0;
+  static const _failedWorkerLoad = 1 << 30;
 
   final _name = 'vectorTileWorker${++_spawnedWorkers}';
   final _replies = ReceivePort();
@@ -30,7 +34,7 @@ class KillableIsolateExecutor extends ExecutorDelegate {
   SendPort? _requests;
   Isolate? _isolate;
   RemoteError? _uncaughtError;
-  (Object, StackTrace)? _failure;
+  (WorkerFailure, StackTrace)? _failure;
   var _nextKey = 0;
   var _disposed = false;
 
@@ -38,7 +42,7 @@ class KillableIsolateExecutor extends ExecutorDelegate {
   bool get disposed => _disposed;
 
   @override
-  int get outstanding => _jobs.length;
+  int get outstanding => _failure == null ? _jobs.length : _failedWorkerLoad;
 
   @override
   bool hasJobWithDeduplicationKey(Job job) =>
@@ -52,8 +56,8 @@ class KillableIsolateExecutor extends ExecutorDelegate {
     if (_disposed) {
       return Future.error(CancellationException());
     }
-    if (_failure case (final error, final stackTrace)) {
-      return Future.error(error, stackTrace);
+    if (_failure case (final failure, final stackTrace)) {
+      return Future.error(failure, stackTrace);
     }
     final queued = _WorkerJob(_nextKey++, job);
     _jobs[queued.key] = queued;
@@ -93,7 +97,7 @@ class KillableIsolateExecutor extends ExecutorDelegate {
         ..addErrorListener(_replies.sendPort)
         ..resume(isolate.pauseCapability!);
     } catch (error, stackTrace) {
-      _fail(error, stackTrace);
+      _fail(WorkerFailure('$_name failed to spawn', error), stackTrace);
     }
   }
 
@@ -124,18 +128,29 @@ class KillableIsolateExecutor extends ExecutorDelegate {
 
   void _failOnExit() {
     if (_uncaughtError case final error?) {
-      _fail(error, error.stackTrace);
+      _fail(
+        WorkerFailure('$_name died of an uncaught error', error),
+        error.stackTrace,
+      );
     } else {
-      _fail(StateError('$_name exited'), StackTrace.current);
+      _fail(WorkerFailure('$_name exited'), StackTrace.current);
     }
   }
 
-  void _fail(Object error, StackTrace stackTrace) {
+  void _fail(WorkerFailure failure, StackTrace stackTrace) {
     if (_disposed || _failure != null) {
       return;
     }
-    _failure = (error, stackTrace);
-    _stop((job) => job.fail(error, stackTrace));
+    _failure = (failure, stackTrace);
+    _stop((job) => job.fail(failure, stackTrace));
+    FlutterError.reportError(
+      FlutterErrorDetails(
+        exception: failure,
+        stack: stackTrace,
+        library: 'vector_map_tiles',
+        context: ErrorDescription('while running map tile jobs'),
+      ),
+    );
   }
 
   void _stop(void Function(_WorkerJob job) settle) {
