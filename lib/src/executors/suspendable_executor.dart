@@ -5,18 +5,19 @@ import 'package:executor_lib/executor_lib.dart';
 import 'lifecycle_aware_executor.dart';
 
 class SuspendableExecutor implements LifecycleAwareExecutor {
-  SuspendableExecutor(this._createPool) : _pool = _createPool();
+  SuspendableExecutor(this._createPool);
 
   final Executor Function() _createPool;
   final _setupJobs = <_PendingJob>[];
   final _running = <_PendingJob>{};
   final _waiting = <_PendingJob>[];
   Executor? _pool;
+  var _suspended = false;
   var _replaying = false;
   var _disposed = false;
 
   @override
-  bool get isSuspended => _pool == null;
+  bool get isSuspended => _suspended;
 
   @override
   bool get disposed => _disposed;
@@ -27,11 +28,10 @@ class SuspendableExecutor implements LifecycleAwareExecutor {
       return Future.error(CancellationException());
     }
     final pending = _PendingJob(job, onEveryWorker: false);
-    final pool = _pool;
-    if (pool == null || _replaying) {
+    if (_suspended || _replaying) {
       _waiting.add(pending);
     } else {
-      _run(pending, pool);
+      _run(pending, _livePool());
     }
     return pending.future;
   }
@@ -47,12 +47,16 @@ class SuspendableExecutor implements LifecycleAwareExecutor {
 
   @override
   void suspend() {
+    if (_disposed || _suspended) {
+      return;
+    }
+    _suspended = true;
+    _replaying = false;
     final pool = _pool;
-    if (_disposed || pool == null) {
+    if (pool == null) {
       return;
     }
     _pool = null;
-    _replaying = false;
     final interrupted = _running.where((job) => !job.isCompleted).toList();
     _running.clear();
     for (final job in [..._setupJobs, ...interrupted]) {
@@ -64,9 +68,10 @@ class SuspendableExecutor implements LifecycleAwareExecutor {
 
   @override
   void resume() {
-    if (_disposed || _pool != null) {
+    if (_disposed || !_suspended) {
       return;
     }
+    _suspended = false;
     final pool = _pool = _createPool();
     _replaying = true;
     Future.wait([for (final setup in _setupJobs) setup.runOn(pool)])
@@ -103,11 +108,13 @@ class SuspendableExecutor implements LifecycleAwareExecutor {
   _PendingJob<Q, R> _addSetupJob<Q, R>(Job<Q, R> job) {
     final setup = _PendingJob(job, onEveryWorker: true);
     _setupJobs.add(setup);
-    if (_pool case final pool?) {
-      setup.runOn(pool);
+    if (!_suspended) {
+      setup.runOn(_livePool());
     }
     return setup;
   }
+
+  Executor _livePool() => _pool ??= _createPool();
 
   void _run(_PendingJob job, Executor pool) {
     _running.add(job);
